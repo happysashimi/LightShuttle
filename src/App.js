@@ -274,6 +274,7 @@ const bulletHell = {
     spawnRate: 10, // Faster spawn rate
     projectiles: [],
     lasers: [],
+    sniperWarnings: [],
     bombs: [], // Add bombs array
     patterns: [
         // Basic patterns (available from start)
@@ -284,9 +285,9 @@ const bulletHell = {
         { type: 'spiral', speed: 0.7, amount: 16, cooldown: 240, minTime: 30, lastUsed: -9999 },
         { type: 'laser', cooldown: 220, groupSize: 1, minTime: 45, lastUsed: -9999 },
         
-        // Unlock after 60 seconds
-        { type: 'doubleSpiral', speed: 0.6, amount: 20, cooldown: 260, minTime: 90, lastUsed: -9999 },
-        { type: 'shotgun', speed: 1.0, amount: 7, spread: 80, cooldown: 200, minTime: 75, lastUsed: -9999 },
+        // Mid-game patterns unlock between 100 and 120 seconds
+        { type: 'doubleSpiral', speed: 0.6, amount: 12, cooldown: 320, minTime: 120, lastUsed: -9999 },
+        { type: 'shotgun', speed: 1.0, amount: 5, spread: 65, cooldown: 260, minTime: 100, lastUsed: -9999 },
         
         // Unlock after 120 seconds
         { type: 'cross', speed: 1.2, amount: 4, cooldown: 220, minTime: 120, lastUsed: -9999 },
@@ -299,20 +300,20 @@ const bulletHell = {
         // Unlock after 180 seconds
         { type: 'bomb', speed: 2.0, amount: 1, cooldown: 350, minTime: 180, lastUsed: -9999, size: 30, damage: 1 },
         
-        // Unlock after 240 seconds (4 minutes)
-        { type: 'sniper', speed: 5, amount: 1, spread: 5, cooldown: 350, size: 4, minTime: 240, lastUsed: -9999 },
+        // Sniper unlocks before the final pattern set
+        { type: 'sniper', speed: 24, amount: 1, cooldown: 420, warningTime: 90, minTime: 150, lastUsed: -9999 },
         { type: 'laser', cooldown: 220, groupSize: 2, minTime: 240, lastUsed: -9999 },
         
         // Big bullet unlocks at 120 seconds
         { type: 'bigbullet', speed: 1.5, amount: 1, cooldown: 400, minTime: 120, lastUsed: -9999, size: 80, damage: 1 },
         
-        // Rotating bullets unlock at 90 seconds
-        { type: 'rotating', amount: 6, cooldown: 300, minTime: 90, lastUsed: -9999, orbitRadius: 120, orbitSpeed: 0.05 },
+        // Rotating distraction bullets unlock after 120 seconds
+        { type: 'rotating', amount: 4, cooldown: 360, minTime: 120, lastUsed: -9999, orbitRadius: 120, orbitSpeed: 0.05 },
     ],
     lastPatternTime: 0,
-    minTimeBetweenPatterns: 45, // Increased minimum time between patterns
+    minTimeBetweenPatterns: 60,
     gameTime: 0,
-    difficulty: 1.2 // Start with easier difficulty
+    difficulty: 1.0
 };
 
 // Player hit handling
@@ -352,6 +353,19 @@ function createBulletPattern(pattern, x, y) {
     });
     
     switch (pattern.type) {
+        case 'sniper': {
+            const targetX = player.x + player.width / 2;
+            const targetY = player.y + player.height / 2;
+            bulletHell.sniperWarnings.push({
+                x,
+                y,
+                angle: Math.atan2(targetY - y, targetX - x),
+                timer: 0,
+                warningTime: pattern.warningTime || 90,
+                shotSpeed: pattern.speed || 24
+            });
+            break;
+        }
         default:
             // Handle unexpected pattern types
             break;
@@ -810,11 +824,12 @@ function createBulletPattern(pattern, x, y) {
                 bullets.push({
                     x: bulletX,
                     y: bulletY,
-                    width: 12,
-                    height: 12,
+                    width: 9,
+                    height: 9,
                     damage: 1,
                     isPlayerProjectile: false,
-                    color: `hsl(${Math.random() * 360}, 100%, 60%)`, // Random starting color
+                    color: `hsl(${Math.random() * 360}, 100%, 60%)`,
+                    isDistraction: true,
                     rotating: true,
                     state: 'entering',
                     entryAngle: entryAngle,
@@ -836,12 +851,9 @@ function createBulletPattern(pattern, x, y) {
 
 // Update bullet hell system
 function updateBulletHell() {
-    // Update game time and difficulty (slower scaling)
-    bulletHell.gameTime += 1; // Increment frame counter
+    bulletHell.gameTime += 1;
     const gameTimeInSeconds = bulletHell.gameTime / 60;
-    
-    // Much slower difficulty scaling - reaches 2x at 300 seconds (5 minutes)
-    bulletHell.difficulty = 1.0 + Math.min(gameTimeInSeconds / 120, 1.0); // Cap at 2x difficulty
+    bulletHell.difficulty = 1.0 + Math.min(gameTimeInSeconds / 240, 1.0);
     
     // Update pattern cooldowns and select available patterns
     let availablePatterns = [];
@@ -876,8 +888,7 @@ function updateBulletHell() {
     }
     
     // If we have available patterns and enough time has passed since last pattern
-    // Reduce minimum time between patterns as difficulty increases
-    const minTime = Math.max(30, bulletHell.minTimeBetweenPatterns * (1.5 - (bulletHell.difficulty - 1) * 0.3));
+    const minTime = Math.max(60, bulletHell.minTimeBetweenPatterns * (1.5 - (bulletHell.difficulty - 1) * 0.3));
     
     if (availablePatterns.length > 0 && 
         (bulletHell.gameTime - bulletHell.lastPatternTime) >= minTime) {
@@ -925,26 +936,46 @@ function updateBulletHell() {
             }
         }
         
-        // Scale pattern based on difficulty (gentler scaling)
         const scaledPattern = {
             ...pattern,
-            amount: Math.ceil(pattern.amount * (1 + (bulletHell.difficulty - 1) * 0.3)),
-            speed: pattern.speed * (1 + (bulletHell.difficulty - 1) * 0.1),
+            amount: Math.min(
+                Math.ceil(pattern.amount * (1 + (bulletHell.difficulty - 1) * 0.2)),
+                pattern.type === 'doubleSpiral' ? 14 : 18
+            ),
+            speed: pattern.speed * (1 + (bulletHell.difficulty - 1) * 0.08),
             cooldown: pattern.cooldown * (1 - (bulletHell.difficulty - 1) * 0.05)
         };
         
-        // Spawn bullets in the selected pattern
         const patternBullets = createBulletPattern(scaledPattern, x, y);
-        if (patternBullets && patternBullets.length > 0) {
-            projectiles.push(...patternBullets);
-        }
-        
-        const bullets = createBulletPattern(pattern, x, y);
-        if (bullets) {
-            projectiles.push(...bullets);
-        }
+        projectiles.push(...patternBullets);
     }
     
+    for (let i = bulletHell.sniperWarnings.length - 1; i >= 0; i--) {
+        const warning = bulletHell.sniperWarnings[i];
+        warning.timer += 1;
+        warning.angle = Math.atan2(
+            player.y + player.height / 2 - warning.y,
+            player.x + player.width / 2 - warning.x
+        );
+
+        if (warning.timer >= warning.warningTime) {
+            projectiles.push({
+                x: warning.x,
+                y: warning.y,
+                width: 18,
+                height: 8,
+                speed: warning.shotSpeed,
+                vx: Math.cos(warning.angle) * warning.shotSpeed,
+                vy: Math.sin(warning.angle) * warning.shotSpeed,
+                damage: 2,
+                isPlayerProjectile: false,
+                isSniperShot: true,
+                color: '#fff0a6'
+            });
+            bulletHell.sniperWarnings.splice(i, 1);
+        }
+    }
+
     // Update lasers
     for (let i = bulletHell.lasers.length - 1; i >= 0; i--) {
         const laser = bulletHell.lasers[i];
@@ -1345,25 +1376,16 @@ function updateProjectiles() {
             p.width = p.baseSize * pulseSize;
         }
         
-        // Update position based on velocity or custom update function
-        if (p.update) {
-            // Use custom update function for special movement patterns
-            p.update();
-        } else {
-            // Standard movement
-            p.x += p.vx;
-            p.y += p.vy;
-        }
-        
-        // Apply acceleration if defined
         if (p.acceleration) {
             p.speed *= p.acceleration;
             const angle = Math.atan2(p.vy, p.vx);
             p.vx = Math.cos(angle) * p.speed;
             p.vy = Math.sin(angle) * p.speed;
         }
-        
-        if (p.vx !== undefined && p.vy !== undefined) {
+
+        if (p.update) {
+            p.update();
+        } else if (p.vx !== undefined && p.vy !== undefined) {
             p.x += p.vx;
             p.y += p.vy;
         } else {
@@ -1465,6 +1487,28 @@ function gameLoop() {
     ctx.fill();
     ctx.restore();
     
+    bulletHell.sniperWarnings.forEach(warning => {
+        const warningProgress = warning.timer / warning.warningTime;
+        const isFlashing = warningProgress > 0.65 && Math.floor(warning.timer / 5) % 2 === 0;
+        const lineLength = Math.hypot(canvas.width, canvas.height) * 1.5;
+
+        ctx.save();
+        ctx.globalAlpha = isFlashing ? 0.95 : 0.32 + warningProgress * 0.25;
+        ctx.strokeStyle = '#ff4d5e';
+        ctx.lineWidth = isFlashing ? 3 : 2;
+        ctx.beginPath();
+        ctx.moveTo(
+            warning.x - Math.cos(warning.angle) * lineLength,
+            warning.y - Math.sin(warning.angle) * lineLength
+        );
+        ctx.lineTo(
+            warning.x + Math.cos(warning.angle) * lineLength,
+            warning.y + Math.sin(warning.angle) * lineLength
+        );
+        ctx.stroke();
+        ctx.restore();
+    });
+
     // Draw projectiles
     projectiles.forEach(p => {
         if (p.type === 'bomb') {
@@ -1494,6 +1538,15 @@ function gameLoop() {
                 ctx.fill();
             });
             ctx.globalAlpha = 1;
+        } else if (p.isSniperShot) {
+            ctx.save();
+            ctx.translate(p.x + p.width / 2, p.y + p.height / 2);
+            ctx.rotate(Math.atan2(p.vy, p.vx));
+            ctx.fillStyle = p.color;
+            ctx.shadowColor = '#ff4055';
+            ctx.shadowBlur = 14;
+            ctx.fillRect(-p.width / 2, -p.height / 2, p.width, p.height);
+            ctx.restore();
         } else if (p.isBigBullet) {
             // Draw big bullet as a glowing circle
             ctx.fillStyle = p.color;
@@ -1511,10 +1564,11 @@ function gameLoop() {
             
             ctx.shadowBlur = 0;
         } else if (p.rotating) {
-            // Draw rotating bullet with black outline
+            ctx.save();
+            ctx.globalAlpha = p.isDistraction ? 0.42 : 1;
             ctx.fillStyle = p.color;
             ctx.shadowColor = p.color;
-            ctx.shadowBlur = 15;
+            ctx.shadowBlur = 4;
             
             // Draw the filled circle
             ctx.beginPath();
@@ -1527,6 +1581,7 @@ function gameLoop() {
             ctx.stroke();
             
             ctx.shadowBlur = 0;
+            ctx.restore();
         } else {
             // Draw regular projectiles
             if (p.color) {
@@ -1652,10 +1707,13 @@ async function initGame() {
     gameStartTime = Date.now();
     projectiles = [];
     bulletHell.lasers = [];
-    
-    // Reset bullet hell state
-    bulletHell.patternCooldown = 0;
-    bulletHell.currentPattern = 0;
+    bulletHell.sniperWarnings = [];
+    bulletHell.gameTime = 0;
+    bulletHell.difficulty = 1;
+    bulletHell.lastPatternTime = 0;
+    bulletHell.patterns.forEach(pattern => {
+        pattern.lastUsed = -9999;
+    });
     
     // Show game canvas, hide menus
     document.getElementById('start-menu').style.display = 'none';
