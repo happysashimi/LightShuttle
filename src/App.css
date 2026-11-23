@@ -1,19 +1,38 @@
-body {
+/* The canvas always fills the whole browser window. The game is drawn at a fixed
+   logical size inside it (see resizeCanvas in App.js) and scaled to the largest
+   size that fits, so a wider monitor gets more background, never more arena.
+   The #root rules use !important so they also win over an older index.html. */
+html, body {
   margin: 0;
   padding: 0;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  height: 100vh;
-  background-color: #000;
+  width: 100%;
+  height: 100%;
+  background: #000;
   overflow: hidden;
+  font-family: Arial, sans-serif;
+}
+
+#root {
+  position: fixed !important;
+  inset: 0 !important;
+  width: auto !important;
+  height: auto !important;
+  display: block !important;
 }
 
 #game-container {
-  position: relative;
+  position: absolute !important;
+  inset: 0 !important;
+  width: auto !important;
+  height: auto !important;
 }
 
 #game-canvas {
-  border: 2px solid #fff;
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: none;
   background-color: #111;
 }
