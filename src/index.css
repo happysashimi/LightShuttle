@@ -1,1 +1,4 @@
-    /*this gonna go beep bom boom bam, blocked and bye.*/
+html, body, #root { min-height: 100%; margin: 0; }
+body { min-width: 320px; background: #090a0d; }
+button { font: inherit; }
+::selection { background: #68e7cd; color: #090a0d; }

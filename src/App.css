@@ -1,19 +1,19 @@
-body {
-  margin: 0;
-  padding: 0;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  height: 100vh;
-  background-color: #000;
-  overflow: hidden;
-}
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600;700&display=swap');
 
-#game-container {
-  position: relative;
-}
-
-#game-canvas {
-  border: 2px solid #fff;
-  background-color: #111;
-}
+* { box-sizing: border-box; }
+.game-shell { min-height: 100vh; display: flex; flex-direction: column; padding: 0 5.2vw; color: #f2f3f7; background: #090a0d; font-family: 'Space Grotesk', sans-serif; }
+.topbar { height: 78px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #202127; font: 10px 'DM Mono', monospace; letter-spacing: .11em; color: #777a83; }
+.wordmark { display: inline-flex; align-items: center; gap: 7px; text-decoration: none; color: #f5f4ee; font-size: 12px; letter-spacing: .06em; font-weight: 600; }
+.logo-mark { color: #65e7cd; font-size: 21px; margin-right: 4px; }.wordmark-accent { color: #777a83; margin-left: -7px; }
+.topbar-right { display: flex; align-items: center; gap: 9px; }.status-dot, .live-label b { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #68e5ca; box-shadow: 0 0 10px #68e5ca; }
+.sound-button { color: #a4a6ad; border: 1px solid #303139; background: transparent; padding: 8px 11px; margin-left: 16px; font: inherit; letter-spacing: inherit; cursor: pointer; }.sound-button:hover { border-color: #65e7cd; color: #65e7cd; }
+.game-layout { width: min(1300px, 100%); margin: auto; padding: 52px 0 44px; display: grid; grid-template-columns: minmax(210px, 280px) minmax(0, 1fr); gap: clamp(32px, 5.4vw, 84px); align-items: center; }
+.intro { padding-bottom: 15px; }.eyebrow, .record-label, .arena-top, .arena-footer, .page-footer, .overlay-kicker, .enter-hint { font: 10px 'DM Mono', monospace; letter-spacing: .1em; }.eyebrow { color: #8c8d93; display: flex; align-items: center; gap: 9px; white-space: nowrap; }.eyebrow span:first-child { width: 6px; height: 6px; border: 1px solid #65e7cd; transform: rotate(45deg); }
+.intro h1 { margin: 25px 0 17px; font-size: clamp(52px, 6.2vw, 82px); letter-spacing: -.075em; line-height: .96; font-weight: 500; }.intro h1 span, .overlay-content h2 span { color: #68e7cd; }.intro-copy { margin: 0; color: #85868d; font-size: 14px; line-height: 1.8; }
+.record-card { display: flex; gap: 14px; align-items: center; margin-top: 42px; padding: 15px 0; border-top: 1px solid #25262c; border-bottom: 1px solid #25262c; }.record-icon { font-size: 25px; color: #68e7cd; }.record-card > div { display: flex; flex-direction: column; gap: 7px; }.record-label { color: #7c7e86; font-size: 8px; }.record-card strong { font-size: 19px; font-weight: 500; letter-spacing: .04em; font-family: 'DM Mono', monospace; }.record-card strong small { color: #7c7e86; font-size: 9px; }.record-divider { height: 34px; width: 1px; background: #292a30; margin: 0 5px 0 3px; }.lives strong { color: #68e7cd; font-size: 13px; letter-spacing: .12em; }
+.arena-wrap { min-width: 0; }.arena-top { display: flex; justify-content: space-between; padding: 0 0 12px; color: #a5a5ac; font-size: 9px; }.arena-top i { color: #5b5e66; font-style: normal; }.live-label { display: flex; align-items: center; gap: 7px; color: #68e7cd; }.live-label b { width: 5px; height: 5px; }.arena { position: relative; width: 100%; aspect-ratio: 960 / 600; overflow: hidden; border: 1px solid #282b35; background: #080b16; box-shadow: 0 22px 90px #0008; }.arena canvas { width: 100%; height: 100%; display: block; }
+.game-overlay { position: absolute; inset: 0; display: grid; place-items: center; background: rgba(7, 9, 16, .76); text-align: center; }.overlay-content { padding: 20px; }.ship-emblem { width: 36px; height: 36px; display: grid; place-items: center; border: 1px solid #4d847d; border-radius: 50%; margin: 0 auto 18px; color: #72ead2; font-size: 18px; box-shadow: 0 0 24px #5de8cb26; }.overlay-kicker { color: #70dcca; font-size: 9px; }.overlay-content h2 { margin: 12px 0 8px; font-size: clamp(30px, 4vw, 43px); font-weight: 500; line-height: 1.03; letter-spacing: -.055em; }.overlay-content p { color: #999ba3; font-size: 12px; margin: 0 0 21px; }.start-button { background: #70e7cf; color: #101a19; border: 0; padding: 13px 18px; min-width: 150px; font: 600 10px 'DM Mono', monospace; letter-spacing: .08em; cursor: pointer; transition: background .18s, transform .18s; }.start-button span { margin-left: 17px; font-size: 15px; }.start-button:hover { background: #a1f6e5; transform: translateY(-2px); }.enter-hint { color: #6f727b; font-size: 8px; margin-top: 13px; }
+.arena-footer { min-height: 47px; display: flex; align-items: center; gap: 23px; color: #898b93; font-size: 8px; }.arena-footer > span { display: flex; align-items: center; gap: 4px; white-space: nowrap; }.arena-footer b { font-weight: 400; margin-left: 5px; }.keycap { width: 17px; height: 17px; display: inline-grid; place-items: center; border: 1px solid #373941; border-radius: 2px; font-style: normal; color: #c1c2c8; font-size: 8px; }.keycap.wide { width: auto; min-width: 38px; padding: 0 4px; font-size: 7px; }.arena-footer .footer-tip { margin-left: auto; color: #585b64; font-size: 8px; }.page-footer { display: flex; justify-content: space-between; gap: 12px; padding: 18px 0 22px; border-top: 1px solid #202127; color: #5c5e66; font-size: 8px; }
+@media (min-width: 1500px) { .game-layout { gap: 90px; } }
+@media (max-width: 760px) { .game-shell { padding: 0 22px; }.topbar { height: 63px; }.topbar-right { font-size: 8px; }.sound-button { margin-left: 5px; padding: 7px; }.game-layout { grid-template-columns: 1fr; gap: 25px; padding: 34px 0 27px; }.intro { padding: 0; }.intro h1 { font-size: 52px; margin: 16px 0 10px; }.intro-copy br { display: none; }.intro-copy { font-size: 12px; }.record-card { display: none; }.arena-footer { gap: 12px; }.arena-footer .footer-tip { display: none; }.page-footer { flex-wrap: wrap; font-size: 7px; }.page-footer span:nth-child(2) { display: none; } }
+@media (max-width: 410px) { .game-shell { padding: 0 15px; }.arena-footer { gap: 8px; }.arena-footer b { margin-left: 2px; }.overlay-content h2 { font-size: 31px; }.overlay-content p { font-size: 10px; } }
