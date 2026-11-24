@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import { useEffect } from 'react';
 import './App.css';
 
 // Core game logic for Soulshift
@@ -88,8 +88,6 @@ const HEAL_DELAY_TICKS = 12 * TICK_RATE; // damage-free time needed to heal 1 hi
    ========================================================================== */
 
 let gameRunning = false;
-let gameStarted = false;
-let score = 0;
 const highScores = { normal: 0, hitless: 0 };
 try {
     highScores.normal = Number(localStorage.getItem('highScore')) || 0;
@@ -173,7 +171,7 @@ function getAudioContext() {
 }
 
 // Generate simple sound effects
-function generateSound(type, duration = 0.1, frequency = 440, volume = 0.5) {
+function generateSound(type, duration = 0.1, volume = 0.5) {
     const sampleRate = getAudioContext().sampleRate;
     const buffer = getAudioContext().createBuffer(1, Math.floor(sampleRate * duration), sampleRate);
     const data = buffer.getChannelData(0);
@@ -224,12 +222,12 @@ function generateSound(type, duration = 0.1, frequency = 440, volume = 0.5) {
 
 // Initialize all sounds
 function initSounds() {
-    sounds.hit = generateSound('hit', 0.1, 880, 0.7);
-    sounds.dash = generateSound('dash', 0.3, 800, 0.5);
-    sounds.explosion = generateSound('explosion', 0.5, 110, 0.6);
-    sounds.shoot = generateSound('shoot', 0.15, 660, 0.4);
-    sounds.heal = generateSound('heal', 0.3, 520, 0.5);
-    sounds.background = generateSound('background', 4.0, 220, 0.3);
+    sounds.hit = generateSound('hit', 0.1, 0.7);
+    sounds.dash = generateSound('dash', 0.3, 0.5);
+    sounds.explosion = generateSound('explosion', 0.5, 0.6);
+    sounds.shoot = generateSound('shoot', 0.15, 0.4);
+    sounds.heal = generateSound('heal', 0.3, 0.5);
+    sounds.background = generateSound('background', 4.0, 0.3);
 }
 
 // Play sound function
@@ -587,7 +585,8 @@ function updatePlayer(pl = player) {
     }
 
     // Healing (Normal and 1v1): reward avoiding damage; any hit resets the timer
-    if (gameMode === 'normal' || gameMode === '1v1') {
+    // (frozen while the player is camping a wall - see CAMP)
+    if ((gameMode === 'normal' || gameMode === '1v1') && !(gameState === 'playing' && pl.camp > CAMP.healBlock)) {
         const delay = healDelayTicks();
         if (pl.noHitTimer < delay) {
             pl.noHitTimer++;
@@ -635,6 +634,61 @@ function tryHitPlayer(opts = {}, pl = player) {
     if (!opts.ignoreDash && isDashInvulnerable(pl)) return false;
     takeHit(opts.damage || 1, pl);
     return true;
+}
+
+/* ---------- Anti corner-camping: wall pressure ----------
+   Standing on a wall (and especially in a corner) fills a per-player meter.
+   While it fills: the walls glow and a ring around the ship shows the meter,
+   and healing stops. When it is full a Wall Strike fires: a laser (with the
+   normal 1 s warning) runs through the camper PARALLEL to their wall, so the
+   only way out is inward. Keep camping and strikes repeat faster; in a corner
+   the second strike adds a crossing beam. Leaving the walls drains the meter. */
+
+const CAMP = {
+    edgeBand: 110, // px from a wall that counts as "on the wall"
+    cornerBand: 200, // within this distance of BOTH walls = corner
+    fillEdge: 1 / (7 * TICK_RATE), // full after 7 s on a wall
+    fillCorner: 1 / (3.5 * TICK_RATE), // full after 3.5 s in a corner
+    drain: 1 / (1.5 * TICK_RATE), // empties in 1.5 s away from the walls
+    resetTo: 0.5, // after a strike the meter drops to here
+    healBlock: 0.5 // no heal progress above this
+};
+
+function campZone(pl) {
+    const cx = pl.x + pl.width / 2;
+    const cy = pl.y + pl.height / 2;
+    const dx = Math.min(cx, PLAY_W - cx);
+    const dy = Math.min(cy, PLAY_H - cy);
+    return {
+        cx, cy, dx, dy,
+        edge: Math.min(dx, dy) < CAMP.edgeBand,
+        corner: dx < CAMP.cornerBand && dy < CAMP.cornerBand,
+        vertical: dx < dy // nearest wall is the left / right one
+    };
+}
+
+function wallStrike(pl, z) {
+    // Parallel to the nearest wall, so escaping means moving inward
+    const angle = z.vertical ? Math.PI / 2 : 0;
+    bulletHell.lasers.push(makeLaser(z.cx, z.cy, angle));
+    if (pl.campStrikes >= 1 && z.corner) bulletHell.lasers.push(makeLaser(z.cx, z.cy, angle + Math.PI / 2));
+}
+
+function updateCamping(pl) {
+    if (gameState !== 'playing') {
+        pl.camp = 0;
+        return;
+    }
+    if (pl.hitsRemaining <= 0) return;
+    const z = campZone(pl);
+    const rate = z.corner ? CAMP.fillCorner : z.edge ? CAMP.fillEdge : -CAMP.drain;
+    pl.camp = Math.max(0, pl.camp + rate);
+    if (pl.camp === 0) pl.campStrikes = 0;
+    if (pl.camp >= 1) {
+        wallStrike(pl, z);
+        pl.camp = CAMP.resetTo;
+        pl.campStrikes++;
+    }
 }
 
 /* ---------- 1v1: dashing into the other player hurts THE OTHER player ---------- */
@@ -717,8 +771,11 @@ const bulletHell = {
         { id: 'bomb', type: 'bomb', label: 'Bomb', slots: 2, color: '#ff3b3b', speed: 2.0, amount: 2, cooldown: 350, minTime: 180, size: 30, damage: 1, noScale: true, casts: 0 },
 
         { id: 'pulse', type: 'pulse', label: 'Pulse', slots: 2, color: '#f472b6', speed: 1.0, amount: 8, cooldown: 300, minTime: 210, casts: 2 },
-        { id: 'laser2', type: 'laser', label: 'Laser x2', slots: 3, color: '#ff5c5c', cooldown: 220, groupSize: 2, minTime: 240, noScale: true, casts: 0 }
+        { id: 'laser2', type: 'laser', label: 'Laser x2', slots: 3, color: '#ff5c5c', cooldown: 220, groupSize: 2, minTime: 240, noScale: true, casts: 0 },
+        // Anti corner-camp: a saw that rides the edge of the field, two laps, then breaks
+        { id: 'sawblade', type: 'sawblade', label: 'Sawblade', slots: 1, color: '#c9d1dc', speed: 3.2, amount: 1, cooldown: 300, minTime: 150, laps: 2, damage: 2, noScale: true, casts: 0 }
     ],
+    sparks: [], // sawblade break-up bursts
     impact: null, // white impact frame shown when a sniper fires
     lastPatternTime: 0,
     minTimeBetweenPatterns: 60,
@@ -1076,8 +1133,6 @@ const ghosts = []; // short-lived historical imprints (player + special bullets)
 const GHOST_LIFE = 90;
 const GHOST_MAX = 360;
 let ghostClock = 0;
-let ghostLastX = 0;
-let ghostLastY = 0;
 
 function stampGhost(x, y, r, color, shape, angle) {
     if (ghosts.length >= GHOST_MAX) ghosts.shift();
@@ -1136,6 +1191,25 @@ function makeMover(x, y, size, angle, speed, color, acceleration, extra) {
 }
 
 // Create bullets for one pattern. `plan` was decided when the pattern was loaded.
+// One laser: a red outline for 1 s, then a beam for half a second
+function makeLaser(x, y, angle) {
+    return {
+        x,
+        y,
+        width: LASER_LENGTH, // stretches across the whole screen
+        height: 45 * ENTITY_SCALE,
+        isWarning: true,
+        warningTime: 60, // 1 second warning
+        activeTime: 30, // 0.5 seconds active
+        timer: 0,
+        damage: 2,
+        isPlayerProjectile: false,
+        angle,
+        trails: [],
+        trailLifetime: 40
+    };
+}
+
 function createBulletPattern(pattern, plan = {}) {
     const bullets = [];
     const x = plan.x !== undefined ? plan.x : PLAY_W / 2;
@@ -1228,27 +1302,60 @@ function createBulletPattern(pattern, plan = {}) {
             // Warning first (red outline), then the beam
             const groupSize = pattern.groupSize || 1;
             for (let g = 0; g < groupSize; g++) {
-                const laser = {
-                    x: PLAY_W / 2 + (rand() - 0.5) * 200,
-                    y: PLAY_H / 2 + (rand() - 0.5) * 200,
-                    width: LASER_LENGTH, // stretches across the whole screen
-                    height: 45 * ENTITY_SCALE,
-                    isWarning: true,
-                    warningTime: 60, // 1 second warning
-                    activeTime: 30, // 0.5 seconds active
-                    timer: 0,
-                    damage: 2,
-                    isPlayerProjectile: false,
-                    angle: rand() * TAU,
-                    trails: [],
-                    trailLifetime: 40
-                };
+                const lx = PLAY_W / 2 + (rand() - 0.5) * 200;
+                const ly = PLAY_H / 2 + (rand() - 0.5) * 200;
+                const laser = makeLaser(lx, ly, rand() * TAU);
                 // For multiple lasers, space them out by angle
                 if (groupSize > 1) {
                     laser.angle = (TAU * g) / groupSize;
                 }
                 bulletHell.lasers.push(laser);
             }
+            break;
+        }
+
+        case 'sawblade': {
+            // Starts at a random point on the edge and runs the full perimeter
+            // `laps` times, then breaks apart. It is aimed at corners, so a
+            // corner camper must leave the corner or take the hit.
+            const perim = 2 * (PLAY_W + PLAY_H);
+            const start = rand() * perim;
+            const dir = rand() < 0.5 ? 1 : -1;
+            const saw = {
+                x: 0,
+                y: 0,
+                width: 22 * ENTITY_SCALE,
+                height: 22 * ENTITY_SCALE,
+                damage: pattern.damage || 2,
+                round: true,
+                isPlayerProjectile: false,
+                isSawblade: true,
+                color: '#c9d1dc',
+                saw: { along: start, dir, travelled: 0, total: perim * (pattern.laps || 2), speed: pattern.speed, spin: 0 },
+                lifetime: 100000,
+                update: function () {
+                    const w = this.saw;
+                    w.along += w.dir * w.speed;
+                    w.travelled += w.speed;
+                    w.spin += 0.35;
+                    const p = ((w.along % perim) + perim) % perim;
+                    let px, py;
+                    if (p < PLAY_W) { px = p; py = 0; }
+                    else if (p < PLAY_W + PLAY_H) { px = PLAY_W; py = p - PLAY_W; }
+                    else if (p < 2 * PLAY_W + PLAY_H) { px = PLAY_W - (p - PLAY_W - PLAY_H); py = PLAY_H; }
+                    else { px = 0; py = PLAY_H - (p - 2 * PLAY_W - PLAY_H); }
+                    this.x = Math.max(0, Math.min(PLAY_W, px)) - this.width / 2;
+                    this.y = Math.max(0, Math.min(PLAY_H, py)) - this.height / 2;
+                    this.vx = 0;
+                    this.vy = 0;
+                    if (w.travelled >= w.total) {
+                        // breaks apart into a short burst of sparks after its second lap
+                        this.dead = true;
+                        bulletHell.sparks.push({ x: this.x + this.width / 2, y: this.y + this.height / 2, age: 0 });
+                    }
+                }
+            };
+            bullets.push(saw);
             break;
         }
 
@@ -1570,6 +1677,11 @@ function updateBulletHell() {
     if (bulletHell.impact) {
         bulletHell.impact.timer++;
         if (bulletHell.impact.timer >= bulletHell.impact.duration) bulletHell.impact = null;
+    }
+
+    // Sawblade break-up sparks (visual only)
+    for (let i = bulletHell.sparks.length - 1; i >= 0; i--) {
+        if (++bulletHell.sparks[i].age >= 24) bulletHell.sparks.splice(i, 1);
     }
 
     // Sniper warnings: track the player, lock the aim a moment before firing
@@ -2025,6 +2137,25 @@ function drawPlayer(pl = player) {
     ctx.restore();
 }
 
+function drawSparks() {
+    ctx.save();
+    for (const sp of bulletHell.sparks) {
+        const t = sp.age / 24;
+        ctx.globalAlpha = 1 - t;
+        ctx.strokeStyle = '#e6ecf5';
+        ctx.lineWidth = 2;
+        for (let k = 0; k < 10; k++) {
+            const a = (k * TAU) / 10;
+            const r0 = 10 + t * 30;
+            ctx.beginPath();
+            ctx.moveTo(sp.x + Math.cos(a) * r0, sp.y + Math.sin(a) * r0);
+            ctx.lineTo(sp.x + Math.cos(a) * (r0 + 12), sp.y + Math.sin(a) * (r0 + 12));
+            ctx.stroke();
+        }
+    }
+    ctx.restore();
+}
+
 function drawSniperWarnings() {
     bulletHell.sniperWarnings.forEach(warning => {
         const progress = warning.timer / warning.warningTime;
@@ -2090,7 +2221,39 @@ function drawLasers() {
     });
 }
 
+function drawSawblade(p) {
+    const cx = p.x + p.width / 2;
+    const cy = p.y + p.height / 2;
+    const r = p.width / 2;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(p.saw.spin);
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    const teeth = 12;
+    for (let i = 0; i < teeth * 2; i++) {
+        const rr = i % 2 === 0 ? r : r * 0.72;
+        const a = (i * Math.PI) / teeth;
+        if (i === 0) ctx.moveTo(Math.cos(a) * rr, Math.sin(a) * rr);
+        else ctx.lineTo(Math.cos(a) * rr, Math.sin(a) * rr);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = '#2a2f38';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.fillStyle = '#2a2f38';
+    ctx.beginPath();
+    ctx.arc(0, 0, r * 0.22, 0, TAU);
+    ctx.fill();
+    ctx.restore();
+}
+
 function drawProjectile(p) {
+    if (p.isSawblade) {
+        drawSawblade(p);
+        return;
+    }
     if (p.type === 'bomb') {
         ctx.fillStyle = p.color;
         ctx.beginPath();
@@ -2230,6 +2393,54 @@ function drawSideDecor() {
         };
         legend('p1', sr.x / 2, '#4da6ff', 'PLAYER 1');
         legend('p2', CANVAS_W + (sr.w + sr.x - CANVAS_W) / 2, '#ff9f43', 'PLAYER 2');
+    }
+}
+
+// Wall glow + a ring around the ship that fills with the camping meter
+function drawWallPressure() {
+    if (gameState !== 'playing') return;
+    for (const pl of activePlayers()) {
+        if (pl.camp < 0.15 || pl.hitsRemaining <= 0) continue;
+        const z = campZone(pl);
+        const a = Math.min(1, pl.camp);
+        const pulse = 0.65 + 0.35 * Math.sin(menu.t * 0.25);
+
+        // ring around the ship: fills clockwise as the meter fills
+        ctx.save();
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = a > 0.75 ? '#ff3b3b' : '#ffb347';
+        ctx.globalAlpha = 0.9;
+        ctx.beginPath();
+        ctx.arc(z.cx, z.cy, 30 * ENTITY_SCALE, -Math.PI / 2, -Math.PI / 2 + TAU * a);
+        ctx.stroke();
+        ctx.restore();
+
+        // walls heat up once the meter is meaningful
+        if (pl.camp >= 0.3) {
+            const strength = Math.min(1, (pl.camp - 0.3) / 0.7) * 0.55 * pulse;
+            const depth = 70;
+            const strips = [];
+            if (z.vertical || z.corner) strips.push(z.cx < PLAY_W / 2 ? 'left' : 'right');
+            if (!z.vertical || z.corner) strips.push(z.cy < PLAY_H / 2 ? 'top' : 'bottom');
+            for (const side of strips) {
+                let g;
+                let rx = 0;
+                let ry = 0;
+                let rw = PLAY_W;
+                let rh = PLAY_H;
+                if (side === 'left') { g = ctx.createLinearGradient(0, 0, depth, 0); rw = depth; }
+                else if (side === 'right') { g = ctx.createLinearGradient(PLAY_W, 0, PLAY_W - depth, 0); rx = PLAY_W - depth; rw = depth; }
+                else if (side === 'top') { g = ctx.createLinearGradient(0, 0, 0, depth); rh = depth; }
+                else { g = ctx.createLinearGradient(0, PLAY_H, 0, PLAY_H - depth); ry = PLAY_H - depth; rh = depth; }
+                g.addColorStop(0, 'rgba(255, 60, 40, 0.9)');
+                g.addColorStop(1, 'rgba(255, 60, 40, 0)');
+                ctx.save();
+                ctx.globalAlpha = strength;
+                ctx.fillStyle = g;
+                ctx.fillRect(rx, ry, rw, rh);
+                ctx.restore();
+            }
+        }
     }
 }
 
@@ -3098,8 +3309,10 @@ function render() {
         drawPlayer();
     } else {
         drawGhosts();
+        drawWallPressure();
         drawLasers();
         drawSniperWarnings();
+        drawSparks();
         drawProjectiles();
         drawPlayer();
         if (twoPlayer) drawPlayer(player2);
@@ -3701,6 +3914,7 @@ function updateGame() {
             break;
         default: // 'playing' and 'practice'
             activePlayers().forEach(pl => updatePlayer(pl));
+            activePlayers().forEach(pl => updateCamping(pl));
             checkRam();
             updateBulletHell();
             updateProjectiles();
@@ -3708,7 +3922,7 @@ function updateGame() {
             updateGhosts();
             if (gameState === 'practice') practice.t++;
             // Score is simulation time, so it is not affected by tab throttling
-            else score = Math.floor(bulletHell.gameTime / TICK_RATE);
+            // (simulation time is read directly from bulletHell.gameTime)
             break;
     }
 }
@@ -3803,10 +4017,13 @@ function resetPlayer(maxHits, pl = player) {
     pl.vy = 0;
     pl.healTimer = 0;
     pl.noHitTimer = 0;
+    pl.camp = 0;
+    pl.campStrikes = 0;
 }
 
 function clearBullets() {
     projectiles = [];
+    bulletHell.sparks.length = 0;
     ghosts.length = 0;
     pops.length = 0;
     bulletHell.impact = null;
@@ -3847,7 +4064,6 @@ function initGame(mode = 'normal') {
     if (gameState === 'playing') return;
     gameState = 'playing';
     gameRunning = true;
-    gameStarted = true;
     gameMode = mode === 'hitless' ? 'hitless' : mode === '1v1' ? '1v1' : 'normal';
     twoPlayer = gameMode === '1v1';
     unseedRandom();
@@ -3866,7 +4082,6 @@ function initGame(mode = 'normal') {
         ramCooldown = 0;
     }
 
-    score = 0;
     run.realMs = 0;
     gameStartTime = performance.now();
     clearBullets();
@@ -3915,7 +4130,8 @@ function showGameOver() {
     survivalTime = Math.floor(run.realMs / 1000); // real seconds survived
 
     if (DEBUG) {
-        console.log('[debug] wall clock seconds', Math.floor((performance.now() - gameStartTime) / 1000));
+        console.log('[debug] wall clock seconds', Math.floor((performance.now() - gameStartTime) / 1000),
+            'sim seconds', Math.floor(bulletHell.gameTime / TICK_RATE));
     }
 
     if (gameMode === '1v1') {
