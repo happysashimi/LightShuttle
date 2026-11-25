@@ -20,6 +20,17 @@ const ENTITY_SCALE = 1.3;
 // Lasers are long enough to stretch across the whole screen at any angle
 const LASER_LENGTH = 3600;
 
+// Spar (thrown spear)
+const SPAR_LENGTH = 84 * ENTITY_SCALE; // spear length = diameter of its rebound hitbox
+const SPAR_DURABILITY = 8; // bullets deleted / wall hits before it breaks
+const SPAR_ARENA_SPEED = 6.5;
+const SPAR_THROW_SPEED = 11;
+const SPAR_REBOUND_SLOW = 0.5; // speed multiplier after the first rebound
+const SPAR_EMBED_TICKS = 1500; // an embedded spear fades after 25 s
+const SPAR_MAX_EMBEDDED = 6; // at most this many stay stuck in the walls at once
+let sparPairCounter = 0;
+const sparStats = { grabs: 0 }; // dash-grabs this session (used by the lesson demo check)
+
 // All randomness goes through rand() so Pattern Library demos can be seeded and
 // therefore repeat exactly (see seedRandom / LESSONS).
 const realRandom = Math.random.bind(Math);
@@ -443,11 +454,39 @@ function isDashInvulnerable(pl = player) {
     return pl.isDashing || pl.dashGrace > 0;
 }
 
+/* ---------- Dash overrides ----------
+   A dash can be REPLACED by another action when it runs into a special object.
+   To add a new one, push an entry here:
+     id            name (for debugging)
+     grantsIframes false = the replaced dash gives no invulnerability at all
+     find(pl)      returns the object the dash ran into, or null
+     apply(pl, o)  performs the replacement action
+   The dash cooldown is paid either way. Spar's throw is the first one.        */
+const DASH_OVERRIDES = [
+    {
+        id: 'spar-throw',
+        grantsIframes: false,
+        find: pl => findSparInDashPath(pl),
+        apply: (pl, spar) => throwSpar(pl, spar)
+    }
+];
+
+function applyDashOverride(pl) {
+    for (const o of DASH_OVERRIDES) {
+        const target = o.find(pl);
+        if (!target) continue;
+        o.apply(pl, target);
+        if (!o.grantsIframes) {
+            pl.isDashing = false;
+            pl.dashGrace = 0;
+        }
+        return true;
+    }
+    return false;
+}
+
 function startDash(pl = player) {
-    pl.isDashing = true;
-    pl.ramDone = false;
-    pl.dashTimer = pl.dashDuration;
-    pl.dashCooldown = pl.dashCooldownMax;
+    pl.dashCooldown = pl.dashCooldownMax; // paid whether or not the dash is replaced
     if (pl.id === 1 && gameState === 'tutorial') tutorial.dashes++;
     // Store dash direction based on current movement
     pl.dashDirection = { ...pl.direction };
@@ -455,6 +494,14 @@ function startDash(pl = player) {
     if (pl.dashDirection.x === 0 && pl.dashDirection.y === 0) {
         pl.dashDirection = { x: Math.cos(pl.facing), y: Math.sin(pl.facing) };
     }
+    // Dashing into a spar replaces the dash: no movement, no invulnerability
+    if (applyDashOverride(pl)) {
+        playSound('shoot', 0.6, 0.9);
+        return;
+    }
+    pl.isDashing = true;
+    pl.ramDone = false;
+    pl.dashTimer = pl.dashDuration;
     playSound('dash', 0.5, 1.0 + rand() * 0.2);
 }
 
@@ -772,8 +819,11 @@ const bulletHell = {
 
         { id: 'pulse', type: 'pulse', label: 'Pulse', slots: 2, color: '#f472b6', speed: 1.0, amount: 8, cooldown: 300, minTime: 210, casts: 2 },
         { id: 'laser2', type: 'laser', label: 'Laser x2', slots: 3, color: '#ff5c5c', cooldown: 220, groupSize: 2, minTime: 240, noScale: true, casts: 0 },
-        // Anti corner-camp: a saw that rides the edge of the field, two laps, then breaks
-        { id: 'sawblade', type: 'sawblade', label: 'Sawblade', slots: 1, color: '#c9d1dc', speed: 3.2, amount: 1, cooldown: 300, minTime: 150, laps: 2, damage: 2, noScale: true, casts: 0 }
+        // Spar: a thrown spear that sticks in the wall and can be grabbed with a dash.
+        // Normal: 1 slot, long cooldown, from 1:20. 1v1: 12 slots (a whole batch to
+        // itself), from 3 s. `lateUnlock` keeps Hitless from unlocking it at 0 s.
+        { id: 'spar', type: 'spar', label: 'Spar', slots: 1, color: '#e0882a', speed: SPAR_ARENA_SPEED, amount: 1, cooldown: 2400, minTime: 80, lateUnlock: true, noScale: true, casts: 0,
+          modes: { '1v1': { slots: 12, minTime: 3, cooldown: 900 } } }
     ],
     sparks: [], // sawblade break-up bursts
     impact: null, // white impact frame shown when a sniper fires
@@ -810,6 +860,23 @@ const loader = {
     cycleLength: LOADER.baseInterval,
     lastPickedId: null
 };
+
+// Per-mode overrides (e.g. Spar is 1 slot in Normal, 12 in 1v1)
+function modeOverride(def) {
+    return (gameState === 'playing' && def.modes && def.modes[gameMode]) || null;
+}
+function patternSlots(def) {
+    const m = modeOverride(def);
+    return m && m.slots !== undefined ? m.slots : def.slots;
+}
+function patternMinTime(def) {
+    const m = modeOverride(def);
+    return m && m.minTime !== undefined ? m.minTime : def.minTime;
+}
+function patternCooldown(def) {
+    const m = modeOverride(def);
+    return m && m.cooldown !== undefined ? m.cooldown : def.cooldown;
+}
 
 function loaderCapacity() {
     if (gameState === 'playing' && gameMode === 'hitless') return HITLESS_CAPACITY;
@@ -857,6 +924,19 @@ function planPattern(def) {
             return {}; // lasers telegraph themselves
         case 'ratio':
             return { x: PLAY_W / 2, y: PLAY_H / 2 };
+        case 'spar': {
+            // Two opposite points on the arena edge, both aimed through the centre
+            const theta = rand() * Math.PI;
+            const dx = Math.cos(theta);
+            const dy = Math.sin(theta);
+            const t = Math.min((PLAY_W / 2) / Math.max(Math.abs(dx), 1e-6), (PLAY_H / 2) / Math.max(Math.abs(dy), 1e-6));
+            const mk = (sx, sy) => ({
+                edge: Math.abs(sx * t) >= PLAY_W / 2 - 0.5 ? (sx > 0 ? 1 : 3) : (sy > 0 ? 2 : 0),
+                x: PLAY_W / 2 + sx * (t + SPAR_LENGTH / 2 + 8),
+                y: PLAY_H / 2 + sy * (t + SPAR_LENGTH / 2 + 8)
+            });
+            return { spawns: [mk(dx, dy), mk(-dx, -dy)] };
+        }
         case 'cross': {
             if (rand() < 0.7) return { x: PLAY_W / 2, y: PLAY_H / 2 };
             const margin = 150;
@@ -883,8 +963,8 @@ function planPattern(def) {
 }
 
 function patternCooldownTicks(def) {
-    let cooldown = def.cooldown / (1 + (bulletHell.difficulty - 1) * 0.3);
-    if (def.minTime < 60) cooldown *= 0.8; // early patterns come back sooner
+    let cooldown = patternCooldown(def) / (1 + (bulletHell.difficulty - 1) * 0.3);
+    if (def.minTime < 60) cooldown *= 0.8; // early patterns come back sooner // early patterns come back sooner
     if (gameState === 'practice') cooldown *= 0.5; // more reps in practice
     return cooldown;
 }
@@ -919,26 +999,28 @@ function loadBatch(now) {
         def.readyAt = fireAt + patternCooldownTicks(def); // cooldown starts at fire time
         // Difficulty system: a double cast costs an extra half slot and is only
         // possible when that half slot is actually free
-        const plans = castPlans(def, loaderCapacity() - used - def.slots >= 0.5);
+        const plans = castPlans(def, loaderCapacity() - used - patternSlots(def) >= 0.5);
         batch.push({
             def,
             id: def.id,
             label: def.label,
             color: def.color,
-            slots: def.slots,
+            slots: patternSlots(def),
             plan: plans[0],
             plans,
             fireAt,
             fired: false
         });
-        used += def.slots + (plans.length > 1 ? 0.5 : 0);
+        used += patternSlots(def) + (plans.length > 1 ? 0.5 : 0);
         loader.lastPickedId = def.id;
     };
 
     // 1) Patterns that did not fit last cycle go first
     const stillWaiting = [];
     for (const def of loader.carry) {
-        if (used + def.slots <= loaderCapacity()) addEntry(def);
+        const cost = patternSlots(def);
+        // a pattern bigger than the whole queue (Spar in 1v1) takes a batch to itself
+        if (used + cost <= loaderCapacity() || (batch.length === 0 && cost > loaderCapacity())) addEntry(def);
         else stillWaiting.push(def);
     }
     loader.carry = stillWaiting.slice(0, LOADER.maxCarry);
@@ -949,7 +1031,7 @@ function loadBatch(now) {
     while (used < loaderCapacity() && guard++ < 16) {
         const fireAt = now + LOADER.lead + batch.length * LOADER.stagger;
         const eligible = loaderPatterns().filter(def =>
-            (unlockAll() || seconds >= def.minTime) && // unlocked (all in hitless / practice)
+            ((unlockAll() && !def.lateUnlock) || seconds >= patternMinTime(def)) && // unlocked (all in hitless / practice)
             def.readyAt <= fireAt && // not on cooldown
             !rejected.has(def) &&
             !loader.carry.includes(def)
@@ -957,7 +1039,11 @@ function loadBatch(now) {
         if (eligible.length === 0) break;
 
         const def = pickWeighted(eligible, now);
-        if (used + def.slots > loaderCapacity()) {
+        if (patternSlots(def) > loaderCapacity() && batch.length === 0) {
+            addEntry(def); // exclusive batch
+            break;
+        }
+        if (used + patternSlots(def) > loaderCapacity()) {
             // Does not fit: queue it for the next 6-slot cycle
             rejected.add(def);
             if (loader.carry.length < LOADER.maxCarry) loader.carry.push(def);
@@ -970,6 +1056,9 @@ function loadBatch(now) {
     loader.cycleStart = now;
     if (batch.length === 0) {
         loader.cycleLength = LOADER.minInterval;
+    } else if (batch.some(e => e.slots > loaderCapacity())) {
+        // an oversized pattern holds the queue for as long as its slots are worth
+        loader.cycleLength = LOADER.baseInterval * (Math.max(...batch.map(e => e.slots)) / loaderCapacity());
     } else if (batch.some(e => e.def.isDistract)) {
         loader.cycleLength = LOADER.distractInterval; // distraction => 7 s cycle
     } else {
@@ -1072,13 +1161,20 @@ function fireEntry(entry, now) {
     });
 }
 
+// Bullets that matter for pacing: spears embedded in the wall do not count
+function liveCount() {
+    let n = 0;
+    for (const p of projectiles) if (!p.passive) n++;
+    return n;
+}
+
 function updateLoader(autoLoad = true) {
     const now = bulletHell.gameTime;
 
     // Fire patterns whose telegraph time has elapsed
     for (const entry of loader.batch) {
         if (entry.fired || now < entry.fireAt) continue;
-        if (projectiles.length >= LOADER.bulletSoftCap) {
+        if (liveCount() >= LOADER.bulletSoftCap) {
             entry.fireAt = now + 12; // too cluttered right now, wait a moment
             continue;
         }
@@ -1092,7 +1188,7 @@ function updateLoader(autoLoad = true) {
     // Load the next batch: after the interval, or early once everything is gone
     const elapsed = now - loader.cycleStart;
     const allFired = loader.batch.every(e => e.fired);
-    const fieldClear = projectiles.length === 0 &&
+    const fieldClear = liveCount() === 0 &&
         bulletHell.lasers.length === 0 &&
         bulletHell.sniperWarnings.length === 0;
 
@@ -1314,48 +1410,18 @@ function createBulletPattern(pattern, plan = {}) {
             break;
         }
 
-        case 'sawblade': {
-            // Starts at a random point on the edge and runs the full perimeter
-            // `laps` times, then breaks apart. It is aimed at corners, so a
-            // corner camper must leave the corner or take the hit.
-            const perim = 2 * (PLAY_W + PLAY_H);
-            const start = rand() * perim;
-            const dir = rand() < 0.5 ? 1 : -1;
-            const saw = {
-                x: 0,
-                y: 0,
-                width: 22 * ENTITY_SCALE,
-                height: 22 * ENTITY_SCALE,
-                damage: pattern.damage || 2,
-                round: true,
-                isPlayerProjectile: false,
-                isSawblade: true,
-                color: '#c9d1dc',
-                saw: { along: start, dir, travelled: 0, total: perim * (pattern.laps || 2), speed: pattern.speed, spin: 0 },
-                lifetime: 100000,
-                update: function () {
-                    const w = this.saw;
-                    w.along += w.dir * w.speed;
-                    w.travelled += w.speed;
-                    w.spin += 0.35;
-                    const p = ((w.along % perim) + perim) % perim;
-                    let px, py;
-                    if (p < PLAY_W) { px = p; py = 0; }
-                    else if (p < PLAY_W + PLAY_H) { px = PLAY_W; py = p - PLAY_W; }
-                    else if (p < 2 * PLAY_W + PLAY_H) { px = PLAY_W - (p - PLAY_W - PLAY_H); py = PLAY_H; }
-                    else { px = 0; py = PLAY_H - (p - 2 * PLAY_W - PLAY_H); }
-                    this.x = Math.max(0, Math.min(PLAY_W, px)) - this.width / 2;
-                    this.y = Math.max(0, Math.min(PLAY_H, py)) - this.height / 2;
-                    this.vx = 0;
-                    this.vy = 0;
-                    if (w.travelled >= w.total) {
-                        // breaks apart into a short burst of sparks after its second lap
-                        this.dead = true;
-                        bulletHell.sparks.push({ x: this.x + this.width / 2, y: this.y + this.height / 2, age: 0 });
-                    }
-                }
-            };
-            bullets.push(saw);
+        case 'spar': {
+            // Two arena spears, thrown at the centre from opposite sides
+            const spawns = plan.spawns || planPattern(pattern).spawns;
+            const pairId = ++sparPairCounter;
+            spawns.forEach(o => bullets.push(makeSpar({
+                align: 'arena',
+                x: o.x,
+                y: o.y,
+                heading: Math.atan2(PLAY_H / 2 - o.y, PLAY_W / 2 - o.x),
+                speed: pattern.speed,
+                pairId
+            })));
             break;
         }
 
@@ -1808,7 +1874,7 @@ function overlapsPlayer(p, pl = player) {
 
 // Returns true when the bullet was consumed by the contact
 function handleContact(p) {
-    if (p.dead || p.isPlayerProjectile || p.hasExploded) return false;
+    if (p.dead || p.isPlayerProjectile || p.hasExploded || p.isSpar) return false;
     for (const pl of activePlayers()) {
         if (!overlapsPlayer(p, pl)) continue;
 
@@ -1903,6 +1969,10 @@ function updateRotating(p) {
 
 function updateProjectile(p) {
     if (p.dead) return;
+    if (p.isSpar) {
+        updateSpar(p);
+        return;
+    }
 
     // Big bullet destroys overlapping bullets
     if (p.isBigBullet) {
@@ -1910,7 +1980,7 @@ function updateProjectile(p) {
         const cx = p.x + p.width / 2;
         const cy = p.y + p.height / 2;
         for (const other of projectiles) {
-            if (other === p || other.dead || other.isBigBullet) continue;
+            if (other === p || other.dead || other.isBigBullet || other.isSpar) continue;
             const dist = Math.hypot(cx - (other.x + other.width / 2), cy - (other.y + other.height / 2));
             if (dist < r + other.width / 2) other.dead = true;
         }
@@ -2047,6 +2117,336 @@ function updateProjectiles() {
     projectiles = projectiles.filter(p => !p.dead);
 }
 
+/* ==========================================================================
+   SPAR (thrown spear)
+   align   'arena' | 'p1' | 'p2'  (who it belongs to: the pattern, or the player who threw it)
+   state   'thrown'   thin line hitbox, fast
+           'rebound'  after a rebound: slower, circle hitbox (diameter = spear length)
+           'embedded' stuck in the wall (arena spears only), harmless, can be grabbed
+   ========================================================================== */
+
+function syncSpar(s) {
+    s.x = s.cx - SPAR_LENGTH / 2;
+    s.y = s.cy - SPAR_LENGTH / 2;
+    s.width = SPAR_LENGTH;
+    s.height = SPAR_LENGTH;
+}
+
+function makeSpar(o) {
+    const s = {
+        isSpar: true,
+        align: o.align,
+        state: 'thrown',
+        pairId: o.pairId || null,
+        cx: o.x,
+        cy: o.y,
+        heading: o.heading,
+        speed: o.speed,
+        durability: SPAR_DURABILITY,
+        entered: false,
+        age: 0,
+        embedAge: 0,
+        spin: 0,
+        noClash: 0,
+        seed: Math.floor(rand() * 1000),
+        color: '#e0882a',
+        trailLen: 8,
+        damage: 2,
+        isPlayerProjectile: false,
+        passive: false,
+        vx: 0,
+        vy: 0
+    };
+    syncSpar(s);
+    return s;
+}
+
+/* ----- geometry: shapes are { type: 'seg', ax, ay, bx, by, r } or { type: 'circle', x, y, r } ----- */
+
+function distPointSeg(px, py, ax, ay, bx, by) {
+    const dx = bx - ax;
+    const dy = by - ay;
+    const l2 = dx * dx + dy * dy;
+    let t = l2 ? ((px - ax) * dx + (py - ay) * dy) / l2 : 0;
+    t = Math.max(0, Math.min(1, t));
+    return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+}
+
+function segsIntersect(a, b) {
+    const d = (a.bx - a.ax) * (b.by - b.ay) - (a.by - a.ay) * (b.bx - b.ax);
+    if (Math.abs(d) < 1e-9) return false;
+    const t = ((b.ax - a.ax) * (b.by - b.ay) - (b.ay - a.ay) * (b.bx - b.ax)) / d;
+    const u = ((b.ax - a.ax) * (a.by - a.ay) - (b.ay - a.ay) * (a.bx - a.ax)) / d;
+    return t >= 0 && t <= 1 && u >= 0 && u <= 1;
+}
+
+// Distance between two shapes' surfaces (negative when they overlap)
+function shapeDist(a, b) {
+    if (a.type === 'circle' && b.type === 'circle') return Math.hypot(a.x - b.x, a.y - b.y) - a.r - b.r;
+    if (a.type === 'circle') return distPointSeg(a.x, a.y, b.ax, b.ay, b.bx, b.by) - a.r - b.r;
+    if (b.type === 'circle') return shapeDist(b, a);
+    if (segsIntersect(a, b)) return -a.r - b.r;
+    const d = Math.min(
+        distPointSeg(a.ax, a.ay, b.ax, b.ay, b.bx, b.by),
+        distPointSeg(a.bx, a.by, b.ax, b.ay, b.bx, b.by),
+        distPointSeg(b.ax, b.ay, a.ax, a.ay, a.bx, a.by),
+        distPointSeg(b.bx, b.by, a.ax, a.ay, a.bx, a.by)
+    );
+    return d - a.r - b.r;
+}
+
+function sparShape(s) {
+    if (s.state === 'rebound') return { type: 'circle', x: s.cx, y: s.cy, r: SPAR_LENGTH / 2 };
+    const dx = (Math.cos(s.heading) * SPAR_LENGTH) / 2;
+    const dy = (Math.sin(s.heading) * SPAR_LENGTH) / 2;
+    return { type: 'seg', ax: s.cx - dx, ay: s.cy - dy, bx: s.cx + dx, by: s.cy + dy, r: 3 };
+}
+
+function playerShape(pl) {
+    return { type: 'circle', x: pl.x + pl.width / 2, y: pl.y + pl.height / 2, r: pl.width * 0.45 };
+}
+
+// Which arena wall (if any) the spear is touching
+function sparWallSide(s) {
+    if (s.state === 'rebound') {
+        const r = SPAR_LENGTH / 2;
+        if (s.cx - r < 0) return 'left';
+        if (s.cx + r > PLAY_W) return 'right';
+        if (s.cy - r < 0) return 'top';
+        if (s.cy + r > PLAY_H) return 'bottom';
+        return null;
+    }
+    const tx = s.cx + (Math.cos(s.heading) * SPAR_LENGTH) / 2;
+    const ty = s.cy + (Math.sin(s.heading) * SPAR_LENGTH) / 2;
+    if (tx < 0) return 'left';
+    if (tx > PLAY_W) return 'right';
+    if (ty < 0) return 'top';
+    if (ty > PLAY_H) return 'bottom';
+    return null;
+}
+
+// Has the whole spear come inside the arena yet? (arena spears spawn outside it)
+function sparFullyInside(s) {
+    const dx = (Math.cos(s.heading) * SPAR_LENGTH) / 2;
+    const dy = (Math.sin(s.heading) * SPAR_LENGTH) / 2;
+    const inside = (x, y) => x >= 0 && x <= PLAY_W && y >= 0 && y <= PLAY_H;
+    return inside(s.cx - dx, s.cy - dy) && inside(s.cx + dx, s.cy + dy);
+}
+
+function breakSpar(s) {
+    s.dead = true;
+    bulletHell.sparks.push({ x: s.cx, y: s.cy, age: 0 });
+}
+
+function embedSpar(s) {
+    const dir = { x: Math.cos(s.heading), y: Math.sin(s.heading) };
+    // the tip sits in the wall, the shaft sticks out into the arena
+    const tipX = Math.max(0, Math.min(PLAY_W, s.cx + (dir.x * SPAR_LENGTH) / 2));
+    const tipY = Math.max(0, Math.min(PLAY_H, s.cy + (dir.y * SPAR_LENGTH) / 2));
+    s.cx = Math.max(0, Math.min(PLAY_W, tipX - (dir.x * SPAR_LENGTH) / 2));
+    s.cy = Math.max(0, Math.min(PLAY_H, tipY - (dir.y * SPAR_LENGTH) / 2));
+    s.state = 'embedded';
+    s.speed = 0;
+    s.passive = true;
+    s.trail = null;
+    s.trailLen = 0;
+    s.embedAge = 0;
+    s.spin = 0;
+    // Keep the walls readable: only the newest few embedded spears stay
+    const stuck = projectiles.filter(p => p.isSpar && p.state === 'embedded' && !p.dead);
+    if (stuck.length > SPAR_MAX_EMBEDDED) {
+        stuck.sort((a, b) => b.embedAge - a.embedAge);
+        for (let i = 0; i < stuck.length - SPAR_MAX_EMBEDDED; i++) stuck[i].dead = true;
+    }
+}
+
+// Bounce off something: `nx, ny` is the normal pointing away from the obstacle
+function bounceOff(s, nx, ny) {
+    let vx = Math.cos(s.heading) * s.speed;
+    let vy = Math.sin(s.heading) * s.speed;
+    const dot = vx * nx + vy * ny;
+    if (dot < 0) {
+        vx -= 2 * dot * nx;
+        vy -= 2 * dot * ny;
+    }
+    s.heading = Math.atan2(vy, vx);
+    // first rebound: slower, and the hitbox becomes the big circle
+    if (s.state === 'thrown') s.speed *= SPAR_REBOUND_SLOW;
+    else s.speed = Math.max(2, s.speed * 0.95);
+    s.state = 'rebound';
+    s.cx += nx * 3;
+    s.cy += ny * 3;
+    s.noClash = 10;
+}
+
+function reflectOffWall(s, side) {
+    const nx = side === 'left' ? 1 : side === 'right' ? -1 : 0;
+    const ny = side === 'top' ? 1 : side === 'bottom' ? -1 : 0;
+    // pull the spear back inside before bouncing
+    const reach = s.state === 'rebound' ? SPAR_LENGTH / 2 : 0;
+    if (side === 'left') s.cx = Math.max(s.cx, reach + (s.state === 'rebound' ? 0 : Math.abs(Math.cos(s.heading)) * SPAR_LENGTH / 2) + 1);
+    if (side === 'right') s.cx = Math.min(s.cx, PLAY_W - reach - (s.state === 'rebound' ? 0 : Math.abs(Math.cos(s.heading)) * SPAR_LENGTH / 2) - 1);
+    if (side === 'top') s.cy = Math.max(s.cy, reach + (s.state === 'rebound' ? 0 : Math.abs(Math.sin(s.heading)) * SPAR_LENGTH / 2) + 1);
+    if (side === 'bottom') s.cy = Math.min(s.cy, PLAY_H - reach - (s.state === 'rebound' ? 0 : Math.abs(Math.sin(s.heading)) * SPAR_LENGTH / 2) - 1);
+    bounceOff(s, nx, ny);
+}
+
+function isSparTarget(b) {
+    return !b.dead && !b.isPlayerProjectile && !b.rotating && !b.isSpar && !b.isBigBullet;
+}
+
+function sparVsSpars(s) {
+    for (const o of projectiles) {
+        if (o === s || !o.isSpar || o.dead) continue;
+        const touching = () => shapeDist(sparShape(s), sparShape(o)) <= 0;
+
+        // The arena pair clashes in the middle and flies off in random directions
+        if (s.align === 'arena' && o.align === 'arena' && s.pairId && s.pairId === o.pairId &&
+            s.state === 'thrown' && o.state === 'thrown') {
+            if (!touching()) continue;
+            const theta = rand() * TAU;
+            s.heading = theta;
+            o.heading = theta + Math.PI + (rand() - 0.5) * 0.9;
+            [s, o].forEach(sp => {
+                sp.state = 'rebound';
+                sp.speed = SPAR_ARENA_SPEED * SPAR_REBOUND_SLOW;
+                sp.pairId = null;
+                sp.noClash = 12;
+            });
+            pops.push({ x: (s.cx + o.cx) / 2, y: (s.cy + o.cy) / 2, color: '#e0882a', age: 0 });
+            continue;
+        }
+
+        // Different alignment (arena / player 1 / player 2) => rebound off each other
+        if (o.align === s.align || s.noClash > 0 || o.noClash > 0 || !touching()) continue;
+        let nx = o.cx - s.cx;
+        let ny = o.cy - s.cy;
+        const len = Math.hypot(nx, ny) || 1;
+        nx /= len;
+        ny /= len;
+        bounceOff(s, -nx, -ny);
+        if (o.state !== 'embedded') bounceOff(o, nx, ny); // embedded spears stay put
+        pops.push({ x: (s.cx + o.cx) / 2, y: (s.cy + o.cy) / 2, color: '#3b82f6', age: 0 });
+    }
+}
+
+function sparVsPlayers(s) {
+    const shape = sparShape(s);
+    for (const pl of activePlayers()) {
+        if ((s.align === 'p1' && pl.id === 1) || (s.align === 'p2' && pl.id === 2)) continue; // never hurts its owner
+        if (shapeDist(shape, playerShape(pl)) > 0) continue;
+        // arena spears hurt more while they are still a thin, fast line
+        const dmg = s.align === 'arena' ? (s.state === 'thrown' ? 2 : 1) : 1;
+        const landed = tryHitPlayer({ damage: dmg }, pl);
+        if (landed && s.align !== 'arena') {
+            // a thrown spear counts the player hit as a hit and bounces off
+            s.durability--;
+            const nx = s.cx - (pl.x + pl.width / 2);
+            const ny = s.cy - (pl.y + pl.height / 2);
+            const len = Math.hypot(nx, ny) || 1;
+            bounceOff(s, nx / len, ny / len);
+        }
+    }
+}
+
+function sparVsBullets(s) {
+    const shape = sparShape(s);
+    for (const b of projectiles) {
+        if (s.durability <= 0) break;
+        if (b === s || !isSparTarget(b)) continue;
+        const bs = { type: 'circle', x: b.x + b.width / 2, y: b.y + b.height / 2, r: Math.min(b.width, b.height) / 2 };
+        if (shapeDist(shape, bs) > 0) continue;
+        b.dead = true; // each deleted bullet costs one durability
+        s.durability--;
+        pops.push({ x: bs.x, y: bs.y, color: b.color || '#ffffff', age: 0 });
+    }
+}
+
+function updateSpar(s) {
+    s.age++;
+    if (s.noClash > 0) s.noClash--;
+
+    if (s.state === 'embedded') {
+        s.embedAge++;
+        if (s.embedAge >= SPAR_EMBED_TICKS) s.dead = true;
+        syncSpar(s);
+        return;
+    }
+
+    s.cx += Math.cos(s.heading) * s.speed;
+    s.cy += Math.sin(s.heading) * s.speed;
+    if (s.state === 'rebound') s.spin += 0.28;
+    if (!s.entered && sparFullyInside(s)) s.entered = true;
+
+    // Wall: arena spears stick in it; player spears rebound (and it counts as a hit)
+    const side = s.entered ? sparWallSide(s) : null;
+    if (side) {
+        if (s.align === 'arena') {
+            embedSpar(s);
+        } else {
+            s.durability--;
+            reflectOffWall(s, side);
+        }
+    } else {
+        sparVsSpars(s);
+        sparVsPlayers(s);
+        if (s.align !== 'arena') sparVsBullets(s);
+    }
+
+    if (s.durability <= 0) breakSpar(s);
+    syncSpar(s);
+    if (!s.dead) recordTrail(s);
+}
+
+// Dash override: the spear the dash runs into (if any)
+function findSparInDashPath(pl) {
+    const len = Math.hypot(pl.dashDirection.x, pl.dashDirection.y) || 1;
+    const dx = pl.dashDirection.x / len;
+    const dy = pl.dashDirection.y / len;
+    const reach = pl.dashSpeed * pl.dashDuration + pl.width;
+    const ax = pl.x + pl.width / 2;
+    const ay = pl.y + pl.height / 2;
+    const path = { type: 'seg', ax, ay, bx: ax + dx * reach, by: ay + dy * reach, r: pl.width / 2 + 10 };
+    let best = null;
+    let bestD = Infinity;
+    for (const p of projectiles) {
+        if (!p.isSpar || p.dead) continue;
+        if (shapeDist(path, sparShape(p)) > 0) continue;
+        const d = Math.hypot(p.cx - ax, p.cy - ay);
+        if (d < bestD) {
+            best = p;
+            bestD = d;
+        }
+    }
+    return best;
+}
+
+// The dash is replaced by a single-use throw: the spear leaves the player,
+// belongs to them, and its durability resets
+function throwSpar(pl, spar) {
+    const len = Math.hypot(pl.dashDirection.x, pl.dashDirection.y) || 1;
+    const dx = pl.dashDirection.x / len;
+    const dy = pl.dashDirection.y / len;
+    spar.align = pl.id === 1 ? 'p1' : 'p2';
+    spar.state = 'thrown';
+    spar.heading = Math.atan2(dy, dx);
+    spar.speed = SPAR_THROW_SPEED;
+    spar.durability = SPAR_DURABILITY;
+    spar.pairId = null;
+    spar.entered = true;
+    spar.passive = false;
+    spar.embedAge = 0;
+    spar.spin = 0;
+    spar.noClash = 10;
+    spar.trailLen = 8;
+    spar.trail = [];
+    const off = pl.width / 2 + SPAR_LENGTH / 2 + 2;
+    spar.cx = pl.x + pl.width / 2 + dx * off;
+    spar.cy = pl.y + pl.height / 2 + dy * off;
+    syncSpar(spar);
+    sparStats.grabs++;
+}
+
 // Update minions (simplified for bullet hell)
 function updateMinions() {
     // Clear minions for now since we're focusing on bullet hell
@@ -2095,6 +2495,9 @@ function drawEntryMarkers(now) {
             ctx.lineWidth = 2;
 
             if (m.edge === undefined) {
+                // in-field spawn rings are deliberately faint and thin
+                ctx.globalAlpha = blink ? 0.45 : 0.18;
+                ctx.lineWidth = 1.5;
                 ctx.beginPath();
                 ctx.arc(m.x, m.y, (urgent ? 22 : 16) * ENTITY_SCALE, 0, TAU);
                 ctx.stroke();
@@ -2134,6 +2537,56 @@ function drawPlayer(pl = player) {
         ctx.fillStyle = pl.fill;
     }
     ctx.fill();
+    ctx.restore();
+}
+
+function drawSpar(p) {
+    const L = SPAR_LENGTH;
+    const th = 5 * ENTITY_SCALE;
+    const seed = p.seed || 1;
+    ctx.save();
+    const fadeOut = p.state === 'embedded' ? Math.max(0, Math.min(1, (SPAR_EMBED_TICKS - p.embedAge) / 90)) : 1;
+    ctx.globalAlpha = fadeOut;
+    ctx.translate(p.cx, p.cy);
+    // a rebounded spear spins, so its circular hitbox is visible as the swept circle
+    ctx.rotate(p.state === 'rebound' ? p.heading + p.spin : p.heading);
+    // unpolished orange shaft: slightly uneven edges, grain and binding marks
+    const shaftEnd = L / 2 - L * 0.26;
+    const wob = (k) => Math.sin(seed * 1.7 + k * 2.3) * 1.3;
+    ctx.fillStyle = '#d9822b';
+    ctx.beginPath();
+    ctx.moveTo(-L / 2, -th / 2 + wob(0));
+    for (let k = 1; k <= 6; k++) ctx.lineTo(-L / 2 + ((shaftEnd + L / 2) * k) / 6, -th / 2 + wob(k));
+    for (let k = 6; k >= 0; k--) ctx.lineTo(-L / 2 + ((shaftEnd + L / 2) * k) / 6, th / 2 + wob(k + 9));
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = '#8a4b12';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(-L / 2 + 6, -th * 0.15);
+    ctx.lineTo(shaftEnd - 6, th * 0.1);
+    ctx.moveTo(-L / 2 + 10, th * 0.25);
+    ctx.lineTo(shaftEnd - 14, -th * 0.05);
+    ctx.stroke();
+    ctx.strokeStyle = '#5a3210';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(shaftEnd - 10, -th / 2);
+    ctx.lineTo(shaftEnd - 10, th / 2);
+    ctx.moveTo(-L / 2 + 14, -th / 2);
+    ctx.lineTo(-L / 2 + 14, th / 2);
+    ctx.stroke();
+    // blue tip
+    ctx.fillStyle = '#3b82f6';
+    ctx.beginPath();
+    ctx.moveTo(L / 2, 0);
+    ctx.lineTo(shaftEnd, -th * 1.1);
+    ctx.lineTo(shaftEnd, th * 1.1);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = '#1e3a8a';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
     ctx.restore();
 }
 
@@ -2221,37 +2674,10 @@ function drawLasers() {
     });
 }
 
-function drawSawblade(p) {
-    const cx = p.x + p.width / 2;
-    const cy = p.y + p.height / 2;
-    const r = p.width / 2;
-    ctx.save();
-    ctx.translate(cx, cy);
-    ctx.rotate(p.saw.spin);
-    ctx.fillStyle = p.color;
-    ctx.beginPath();
-    const teeth = 12;
-    for (let i = 0; i < teeth * 2; i++) {
-        const rr = i % 2 === 0 ? r : r * 0.72;
-        const a = (i * Math.PI) / teeth;
-        if (i === 0) ctx.moveTo(Math.cos(a) * rr, Math.sin(a) * rr);
-        else ctx.lineTo(Math.cos(a) * rr, Math.sin(a) * rr);
-    }
-    ctx.closePath();
-    ctx.fill();
-    ctx.strokeStyle = '#2a2f38';
-    ctx.lineWidth = 2;
-    ctx.stroke();
-    ctx.fillStyle = '#2a2f38';
-    ctx.beginPath();
-    ctx.arc(0, 0, r * 0.22, 0, TAU);
-    ctx.fill();
-    ctx.restore();
-}
 
 function drawProjectile(p) {
-    if (p.isSawblade) {
-        drawSawblade(p);
+    if (p.isSpar) {
+        drawSpar(p);
         return;
     }
     if (p.type === 'bomb') {
@@ -2814,17 +3240,13 @@ function irisMaxRadius() {
 function drawIrisHold() {
     if (gameState !== 'menu' || !hub) return;
     let best = 0;
-    let color = '#ffffff';
     hub.pads.forEach(p => {
         if (!p.iris) return;
-        const pr = (menu.progress[p.id] || 0) / p.dwell;
-        if (pr > best) {
-            best = pr;
-            color = p.color;
-        }
+        best = Math.max(best, (menu.progress[p.id] || 0) / p.dwell);
     });
     if (best <= 0) return;
-    drawIrisMask(irisMaxRadius() * (1 - Math.min(1, best)), color);
+    // a plain closing circle: no coloured ring around the edge
+    drawIrisMask(irisMaxRadius() * (1 - Math.min(1, best)), null);
 }
 
 function drawTransition() {
@@ -3435,7 +3857,13 @@ const LESSONS = [
       danger: 'A gap can close the moment you reach it.',
       response: 'Aim for a gap where both neighbours are small (cyan) and cross as the big ones shrink.',
       why: 'Neighbours swell in opposition, so gaps open on a rhythm of about 1.2 seconds. Timing your crossing to a shrinking gap works.',
-      plan: { edge: 3, x: -20, y: PLAY_H / 2 }, seed: 1, start: {x: 610, y: 420}, demo: [{t: 0, dur: 12, keys: ["ArrowUp"]}] }
+      plan: { edge: 3, x: -20, y: PLAY_H / 2 }, seed: 1, start: {x: 610, y: 420}, demo: [{t: 0, dur: 12, keys: ["ArrowUp"]}] },
+    { id: 'spar', pattern: 'spar', name: 'Spar',
+      does: 'Two orange spears with blue tips are thrown at the centre from opposite sides. They clash, rebound in random directions, and then stick into the arena wall.',
+      danger: 'Thrown, a spear is a thin line that is easy to miss, and one that has rebounded is a big, slow circle as wide as the spear is long.',
+      response: 'Dash INTO a spear to grab it. Your dash turns into a throw, with no invulnerability, that deletes up to 8 bullets and hurts other players.',
+      why: 'A grabbed spear belongs to you, its durability resets, and it only breaks after 8 bullets or wall hits, so it can clear a wall of bullets. Spears stuck in the wall can be grabbed too.',
+      plan: null, caption: 'dash INTO the spear: your dash becomes a throw (no invulnerability)', start: {x: 560, y: 420}, demo: [{t: 0, dur: 15, keys: ["ArrowUp"]}, {t: 145, dur: 1, keys: ["ArrowDown"], dash: true}] }
 ];
 
 /* ==========================================================================
@@ -3501,7 +3929,7 @@ function canControl() {
 }
 
 function fieldClear() {
-    return projectiles.length === 0 &&
+    return liveCount() === 0 &&
         bulletHell.lasers.length === 0 &&
         bulletHell.sniperWarnings.length === 0;
 }
@@ -3545,16 +3973,16 @@ function buildHub(screen) {
                 title: 'PATTERN LIBRARY', hint: 'Hold on an attack to see how it works and practise it', spawn: { x: 400, y: 545 }, parent: 'practice',
                 pads: LESSONS.map((l, i) => ({
                     id: l.id, label: l.name, icon: 'pattern', pattern: l.pattern, color: patternById(l.pattern).color,
-                    x: 45 + (i % 5) * 145, y: 150 + Math.floor(i / 5) * 120, w: 130, h: 105,
+                    x: 16 + (i % 6) * 130, y: 140 + Math.floor(i / 6) * 112, w: 118, h: 100,
                     dwell: MENU_DWELL.sub, action: () => startLesson(l.id)
                 })).concat([back('practice')])
             };
         case 'custom':
             return {
-                title: 'CUSTOM PRACTICE', hint: 'Hold on an attack to toggle it, then step onto START', spawn: { x: 400, y: 545 }, parent: 'practice',
+                title: 'CUSTOM PRACTICE', hint: 'Hold on an attack to toggle it, then step onto START', spawn: { x: 400, y: 455 }, parent: 'practice',
                 pads: bulletHell.patterns.map((d, i) => ({
                     id: d.id, label: d.label, sub: `${d.slots} slot${d.slots > 1 ? 's' : ''}`, icon: 'pattern', pattern: d.type, color: d.color, toggle: true,
-                    x: 119 + (i % 4) * 144, y: 135 + Math.floor(i / 4) * 94, w: 130, h: 80,
+                    x: 16 + (i % 6) * 130, y: 135 + Math.floor(i / 6) * 94, w: 118, h: 84,
                     dwell: MENU_DWELL.toggle, action: () => toggleCustom(d.id)
                 })).concat([
                     { id: 'speed', icon: 'speed', layout: 'strip', color: '#ffb347', keepLocked: true,
@@ -3681,6 +4109,7 @@ function startLessonNow(id) {
     bulletHell.difficulty = 1;
     resetPatternRuntime();
     practice.hits = 0;
+    sparStats.grabs = 0;
 
     lesson.phase = 'demo';
     lesson.t = 0;
