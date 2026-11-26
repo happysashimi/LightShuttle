@@ -29,7 +29,7 @@ const SPAR_REBOUND_SLOW = 0.5; // speed multiplier after the first rebound
 const SPAR_EMBED_TICKS = 1500; // an embedded spear fades after 25 s
 const SPAR_MAX_EMBEDDED = 6; // at most this many stay stuck in the walls at once
 let sparPairCounter = 0;
-const sparStats = { grabs: 0 }; // dash-grabs this session (used by the lesson demo check)
+const sparStats = { pickups: 0, throws: 0 }; // counters used by the lesson demo check
 
 // All randomness goes through rand() so Pattern Library demos can be seeded and
 // therefore repeat exactly (see seedRandom / LESSONS).
@@ -319,6 +319,7 @@ const player = {
     dashFill: 'rgba(0, 200, 255, 0.7)',
     ghostColor: '#4da6ff',
     ramDone: false,
+    queuedDash: null, // a pending dash replacement, e.g. { id: 'spar-throw', payload }
     x: 100,
     y: 300,
     width: 24, // 0.75 of 32
@@ -454,35 +455,58 @@ function isDashInvulnerable(pl = player) {
     return pl.isDashing || pl.dashGrace > 0;
 }
 
-/* ---------- Dash overrides ----------
-   A dash can be REPLACED by another action when it runs into a special object.
-   To add a new one, push an entry here:
-     id            name (for debugging)
-     grantsIframes false = the replaced dash gives no invulnerability at all
-     find(pl)      returns the object the dash ran into, or null
-     apply(pl, o)  performs the replacement action
-   The dash cooldown is paid either way. Spar's throw is the first one.        */
+/* ---------- Dash replacements (modular) ----------
+   Some objects, when you DASH into them, are picked up and REPLACE YOUR NEXT DASH
+   with another action (the dash that picked it up works normally).
+   To add a new one:
+     1. DASH_PICKUPS    what a dash can pick up:
+          { id, overrideId, find(pl) -> object|null, take(pl, object) -> payload }
+     2. DASH_OVERRIDES  what the replaced dash does:
+          { id, grantsIframes, apply(pl, payload) }
+   The pickup is stored in pl.queuedDash. The replaced dash still pays the dash
+   cooldown, does not move the player, and grants no invulnerability unless the
+   override says grantsIframes: true. Spar's throw is the first one.            */
+const DASH_PICKUPS = [
+    {
+        id: 'spar',
+        overrideId: 'spar-throw',
+        find: pl => findSparTouching(pl),
+        take: (pl, spar) => takeSpar(pl, spar)
+    }
+];
+
 const DASH_OVERRIDES = [
     {
         id: 'spar-throw',
         grantsIframes: false,
-        find: pl => findSparInDashPath(pl),
-        apply: (pl, spar) => throwSpar(pl, spar)
+        apply: (pl, payload) => throwSpar(pl, payload)
     }
 ];
 
-function applyDashOverride(pl) {
-    for (const o of DASH_OVERRIDES) {
-        const target = o.find(pl);
-        if (!target) continue;
-        o.apply(pl, target);
-        if (!o.grantsIframes) {
-            pl.isDashing = false;
-            pl.dashGrace = 0;
-        }
-        return true;
+// Called every tick while a player is dashing
+function checkDashPickups(pl) {
+    if (pl.queuedDash) return; // one thing at a time
+    for (const pickup of DASH_PICKUPS) {
+        const obj = pickup.find(pl);
+        if (!obj) continue;
+        pl.queuedDash = { id: pickup.overrideId, payload: pickup.take(pl, obj) };
+        return;
     }
-    return false;
+}
+
+// Returns true when this dash press was replaced by a queued action
+function applyDashOverride(pl) {
+    const queued = pl.queuedDash;
+    if (!queued) return false;
+    pl.queuedDash = null;
+    const override = DASH_OVERRIDES.find(o => o.id === queued.id);
+    if (!override) return false;
+    override.apply(pl, queued.payload);
+    if (!override.grantsIframes) {
+        pl.isDashing = false;
+        pl.dashGrace = 0;
+    }
+    return true;
 }
 
 function startDash(pl = player) {
@@ -494,7 +518,7 @@ function startDash(pl = player) {
     if (pl.dashDirection.x === 0 && pl.dashDirection.y === 0) {
         pl.dashDirection = { x: Math.cos(pl.facing), y: Math.sin(pl.facing) };
     }
-    // Dashing into a spar replaces the dash: no movement, no invulnerability
+    // A queued replacement (e.g. a held spar) takes this dash: no movement, no invulnerability
     if (applyDashOverride(pl)) {
         playSound('shoot', 0.6, 0.9);
         return;
@@ -598,6 +622,8 @@ function updatePlayer(pl = player) {
     if (pl.isDashing) {
         pl.x += pl.dashDirection.x * pl.dashSpeed;
         pl.y += pl.dashDirection.y * pl.dashSpeed;
+
+        checkDashPickups(pl);
 
         pl.dashTimer--;
         if (pl.dashTimer <= 0) {
@@ -2398,53 +2424,43 @@ function updateSpar(s) {
     if (!s.dead) recordTrail(s);
 }
 
-// Dash override: the spear the dash runs into (if any)
-function findSparInDashPath(pl) {
-    const len = Math.hypot(pl.dashDirection.x, pl.dashDirection.y) || 1;
-    const dx = pl.dashDirection.x / len;
-    const dy = pl.dashDirection.y / len;
-    const reach = pl.dashSpeed * pl.dashDuration + pl.width;
-    const ax = pl.x + pl.width / 2;
-    const ay = pl.y + pl.height / 2;
-    const path = { type: 'seg', ax, ay, bx: ax + dx * reach, by: ay + dy * reach, r: pl.width / 2 + 10 };
-    let best = null;
-    let bestD = Infinity;
+// The spear (if any) the dashing player is touching right now
+function findSparTouching(pl) {
+    const body = playerShape(pl);
+    body.r += 8; // a little generous, so a thin spear is easy to catch
     for (const p of projectiles) {
-        if (!p.isSpar || p.dead) continue;
-        if (shapeDist(path, sparShape(p)) > 0) continue;
-        const d = Math.hypot(p.cx - ax, p.cy - ay);
-        if (d < bestD) {
-            best = p;
-            bestD = d;
-        }
+        if (p.isSpar && !p.dead && shapeDist(body, sparShape(p)) <= 0) return p;
     }
-    return best;
+    return null;
 }
 
-// The dash is replaced by a single-use throw: the spear leaves the player,
-// belongs to them, and its durability resets
-function throwSpar(pl, spar) {
+// Picking a spear up removes it from the field; its durability is back to full
+function takeSpar(pl, spar) {
+    spar.dead = true;
+    pops.push({ x: spar.cx, y: spar.cy, color: '#3b82f6', age: 0 });
+    sparStats.pickups++;
+    return { durability: SPAR_DURABILITY };
+}
+
+// The replaced dash: throw the held spear the way the dash would have gone
+function throwSpar(pl, payload) {
     const len = Math.hypot(pl.dashDirection.x, pl.dashDirection.y) || 1;
     const dx = pl.dashDirection.x / len;
     const dy = pl.dashDirection.y / len;
-    spar.align = pl.id === 1 ? 'p1' : 'p2';
-    spar.state = 'thrown';
-    spar.heading = Math.atan2(dy, dx);
-    spar.speed = SPAR_THROW_SPEED;
-    spar.durability = SPAR_DURABILITY;
-    spar.pairId = null;
-    spar.entered = true;
-    spar.passive = false;
-    spar.embedAge = 0;
-    spar.spin = 0;
-    spar.noClash = 10;
-    spar.trailLen = 8;
-    spar.trail = [];
     const off = pl.width / 2 + SPAR_LENGTH / 2 + 2;
-    spar.cx = pl.x + pl.width / 2 + dx * off;
-    spar.cy = pl.y + pl.height / 2 + dy * off;
-    syncSpar(spar);
-    sparStats.grabs++;
+    const spar = makeSpar({
+        align: pl.id === 1 ? 'p1' : 'p2',
+        x: pl.x + pl.width / 2 + dx * off,
+        y: pl.y + pl.height / 2 + dy * off,
+        heading: Math.atan2(dy, dx),
+        speed: SPAR_THROW_SPEED,
+        pairId: null
+    });
+    spar.durability = payload.durability;
+    spar.entered = true;
+    spar.noClash = 10;
+    projectiles.push(spar);
+    sparStats.throws++;
 }
 
 // Update minions (simplified for bullet hell)
@@ -2527,6 +2543,14 @@ function drawPlayer(pl = player) {
     ctx.lineTo(-pl.width / 2, pl.width / 2);
     ctx.closePath();
 
+    // A held spear sits along the player's side until the next dash throws it
+    if (pl.queuedDash) {
+        ctx.save();
+        ctx.translate(0, pl.width * 0.55);
+        drawSpearShape(pl.width * 1.4, 3.5);
+        ctx.restore();
+    }
+
     // Visual feedback for dashing (and the short post-dash invulnerability)
     if (isDashInvulnerable(pl)) {
         ctx.fillStyle = pl.dashFill;
@@ -2540,53 +2564,27 @@ function drawPlayer(pl = player) {
     ctx.restore();
 }
 
-function drawSpar(p) {
-    const L = SPAR_LENGTH;
-    const th = 5 * ENTITY_SCALE;
-    const seed = p.seed || 1;
-    ctx.save();
-    const fadeOut = p.state === 'embedded' ? Math.max(0, Math.min(1, (SPAR_EMBED_TICKS - p.embedAge) / 90)) : 1;
-    ctx.globalAlpha = fadeOut;
-    ctx.translate(p.cx, p.cy);
-    // a rebounded spear spins, so its circular hitbox is visible as the swept circle
-    ctx.rotate(p.state === 'rebound' ? p.heading + p.spin : p.heading);
-    // unpolished orange shaft: slightly uneven edges, grain and binding marks
-    const shaftEnd = L / 2 - L * 0.26;
-    const wob = (k) => Math.sin(seed * 1.7 + k * 2.3) * 1.3;
-    ctx.fillStyle = '#d9822b';
-    ctx.beginPath();
-    ctx.moveTo(-L / 2, -th / 2 + wob(0));
-    for (let k = 1; k <= 6; k++) ctx.lineTo(-L / 2 + ((shaftEnd + L / 2) * k) / 6, -th / 2 + wob(k));
-    for (let k = 6; k >= 0; k--) ctx.lineTo(-L / 2 + ((shaftEnd + L / 2) * k) / 6, th / 2 + wob(k + 9));
-    ctx.closePath();
-    ctx.fill();
-    ctx.strokeStyle = '#8a4b12';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(-L / 2 + 6, -th * 0.15);
-    ctx.lineTo(shaftEnd - 6, th * 0.1);
-    ctx.moveTo(-L / 2 + 10, th * 0.25);
-    ctx.lineTo(shaftEnd - 14, -th * 0.05);
-    ctx.stroke();
-    ctx.strokeStyle = '#5a3210';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(shaftEnd - 10, -th / 2);
-    ctx.lineTo(shaftEnd - 10, th / 2);
-    ctx.moveTo(-L / 2 + 14, -th / 2);
-    ctx.lineTo(-L / 2 + 14, th / 2);
-    ctx.stroke();
-    // blue tip
+// A plain, unfinished spear: flat orange shaft, blue tip
+function drawSpearShape(L, th) {
+    const shaftEnd = L / 2 - L * 0.24;
+    ctx.fillStyle = '#e0882a';
+    ctx.fillRect(-L / 2, -th / 2, shaftEnd + L / 2, th);
     ctx.fillStyle = '#3b82f6';
     ctx.beginPath();
     ctx.moveTo(L / 2, 0);
-    ctx.lineTo(shaftEnd, -th * 1.1);
-    ctx.lineTo(shaftEnd, th * 1.1);
+    ctx.lineTo(shaftEnd, -th * 1.2);
+    ctx.lineTo(shaftEnd, th * 1.2);
     ctx.closePath();
     ctx.fill();
-    ctx.strokeStyle = '#1e3a8a';
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
+}
+
+function drawSpar(p) {
+    ctx.save();
+    ctx.globalAlpha = p.state === 'embedded' ? Math.max(0, Math.min(1, (SPAR_EMBED_TICKS - p.embedAge) / 90)) : 1;
+    ctx.translate(p.cx, p.cy);
+    // a rebounded spear spins, so its circular hitbox shows as the swept circle
+    ctx.rotate(p.state === 'rebound' ? p.heading + p.spin : p.heading);
+    drawSpearShape(SPAR_LENGTH, 5 * ENTITY_SCALE);
     ctx.restore();
 }
 
@@ -2822,29 +2820,43 @@ function drawSideDecor() {
     }
 }
 
+// The camp meter is deliberately quiet: a thin, faint ring hugging the ship that
+// only shows once the meter means something, and a soft wall glow near the end.
+// (The mechanic itself - fill rates, the Wall Strike laser - is unchanged.)
+const CAMP_VIS = {
+    ringFrom: 0.25, // meter level where the ring appears
+    ringRadius: 22, // hugs the ship (was 30)
+    ringWidth: 1.5, // was 3
+    ringAlpha: 0.4, // alpha when it first appears (was 0.9)
+    ringAlphaFull: 0.75, // alpha just before the strike
+    wallFrom: 0.5, // meter level where the walls start to glow (was 0.3)
+    wallStrength: 0.28, // was 0.55
+    wallDepth: 50 // was 70
+};
+
 // Wall glow + a ring around the ship that fills with the camping meter
 function drawWallPressure() {
     if (gameState !== 'playing') return;
     for (const pl of activePlayers()) {
-        if (pl.camp < 0.15 || pl.hitsRemaining <= 0) continue;
+        if (pl.camp < CAMP_VIS.ringFrom || pl.hitsRemaining <= 0) continue;
         const z = campZone(pl);
         const a = Math.min(1, pl.camp);
         const pulse = 0.65 + 0.35 * Math.sin(menu.t * 0.25);
 
         // ring around the ship: fills clockwise as the meter fills
         ctx.save();
-        ctx.lineWidth = 3;
-        ctx.strokeStyle = a > 0.75 ? '#ff3b3b' : '#ffb347';
-        ctx.globalAlpha = 0.9;
+        ctx.lineWidth = CAMP_VIS.ringWidth;
+        ctx.strokeStyle = a > 0.85 ? '#ff6a4a' : '#ffb347';
+        ctx.globalAlpha = CAMP_VIS.ringAlpha + (CAMP_VIS.ringAlphaFull - CAMP_VIS.ringAlpha) * a;
         ctx.beginPath();
-        ctx.arc(z.cx, z.cy, 30 * ENTITY_SCALE, -Math.PI / 2, -Math.PI / 2 + TAU * a);
+        ctx.arc(z.cx, z.cy, CAMP_VIS.ringRadius * ENTITY_SCALE, -Math.PI / 2, -Math.PI / 2 + TAU * a);
         ctx.stroke();
         ctx.restore();
 
         // walls heat up once the meter is meaningful
-        if (pl.camp >= 0.3) {
-            const strength = Math.min(1, (pl.camp - 0.3) / 0.7) * 0.55 * pulse;
-            const depth = 70;
+        if (pl.camp >= CAMP_VIS.wallFrom) {
+            const strength = Math.min(1, (pl.camp - CAMP_VIS.wallFrom) / (1 - CAMP_VIS.wallFrom)) * CAMP_VIS.wallStrength * pulse;
+            const depth = CAMP_VIS.wallDepth;
             const strips = [];
             if (z.vertical || z.corner) strips.push(z.cx < PLAY_W / 2 ? 'left' : 'right');
             if (!z.vertical || z.corner) strips.push(z.cy < PLAY_H / 2 ? 'top' : 'bottom');
@@ -3001,7 +3013,7 @@ function drawPlayerPanel(pl, x0, compact, tag) {
     const dx = x0 + 8 * (heartSize + spacing) + (compact ? 16 : 36);
     const dashReady = pl.dashCooldown <= 0;
     const dashFill = dashReady ? 1 : 1 - pl.dashCooldown / pl.dashCooldownMax;
-    hudText('DASH', dx, 14, '#8d93a5', 10);
+    hudText(pl.queuedDash ? 'THROW' : 'DASH', dx, 14, pl.queuedDash ? '#e0882a' : '#8d93a5', 10);
     ctx.fillStyle = dashReady ? 'rgba(0, 200, 255, 0.9)' : 'rgba(0, 200, 255, 0.45)';
     ctx.fillRect(dx, 28, barW * dashFill, 10);
     ctx.strokeStyle = 'white';
@@ -3861,9 +3873,9 @@ const LESSONS = [
     { id: 'spar', pattern: 'spar', name: 'Spar',
       does: 'Two orange spears with blue tips are thrown at the centre from opposite sides. They clash, rebound in random directions, and then stick into the arena wall.',
       danger: 'Thrown, a spear is a thin line that is easy to miss, and one that has rebounded is a big, slow circle as wide as the spear is long.',
-      response: 'Dash INTO a spear to grab it. Your dash turns into a throw, with no invulnerability, that deletes up to 8 bullets and hurts other players.',
-      why: 'A grabbed spear belongs to you, its durability resets, and it only breaks after 8 bullets or wall hits, so it can clear a wall of bullets. Spears stuck in the wall can be grabbed too.',
-      plan: null, caption: 'dash INTO the spear: your dash becomes a throw (no invulnerability)', start: {x: 560, y: 420}, demo: [{t: 0, dur: 15, keys: ["ArrowUp"]}, {t: 145, dur: 1, keys: ["ArrowDown"], dash: true}] }
+      response: 'Dash INTO a spear to pick it up (that dash works normally). Your NEXT dash is replaced by a throw, with no invulnerability, that deletes up to 8 bullets and hurts other players.',
+      why: 'A picked-up spear has full durability and only breaks after 8 bullets or wall hits, so one throw can clear a wall of bullets. Spears stuck in the wall can be picked up too.',
+      plan: null, caption: 'dash into the spear to pick it up, then dash again to throw it', start: {x: 549, y: 420}, demo: [{t: 144, dur: 1, keys: ["ArrowLeft"], dash: true}, {t: 179, dur: 1, keys: ["ArrowUp"], dash: true}] }
 ];
 
 /* ==========================================================================
@@ -4109,7 +4121,8 @@ function startLessonNow(id) {
     bulletHell.difficulty = 1;
     resetPatternRuntime();
     practice.hits = 0;
-    sparStats.grabs = 0;
+    sparStats.pickups = 0;
+    sparStats.throws = 0;
 
     lesson.phase = 'demo';
     lesson.t = 0;
@@ -4429,6 +4442,7 @@ function resetPlayer(maxHits, pl = player) {
     pl.speed = 5;
     pl.isDashing = false;
     pl.ramDone = false;
+    pl.queuedDash = null;
     pl.dashCooldown = 0;
     pl.dashDuration = 10;
     pl.dashTimer = 0;
